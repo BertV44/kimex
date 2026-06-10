@@ -1,0 +1,26 @@
+# ---------------------------------------------------------------------------
+# kimex - protection des données sensibles
+#
+# Le receiveString est une clé de migration K10. Ne JAMAIS committer les
+# sorties générées par kimex.sh.
+# ---------------------------------------------------------------------------
+
+# Fichiers de clés générés (un par policy)
+*.key
+
+# Répertoires de sortie usuels (--output-dir)
+keys/
+output/
+out/
+exports/
+kimex-output/
+
+# Dumps JSON / CSV éventuels (contiennent le receiveString complet)
+*.kimex.json
+kimex-*.json
+import-keys*.csv
+kimex-*.csv
+
+# Divers
+*.log
+.DS_Store
