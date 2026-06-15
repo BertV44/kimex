@@ -2,49 +2,49 @@
 #
 # kimex - Kasten Import Key Extractor
 #
-# Récupère les "import keys" (receiveString) des policies Kasten K10 et les
-# exporte de façon structurée (table, JSON, et un fichier .key par policy).
+# Retrieves the "import keys" (receiveString) from Kasten K10 policies and
+# exports them in a structured way (table, JSON, and one .key file per policy).
 #
-# Objectifs :
-#   - Faciliter la création des import policies sur un cluster receveur.
-#   - Séquestrer ces données sensibles pour permettre une restauration même
-#     sans le catalog K10 d'origine.
+# Goals:
+#   - Make it easy to create import policies on a receiving cluster.
+#   - Escrow this sensitive data to allow a restore even without the original
+#     K10 catalog.
 #
-# CRD ciblée : policies.config.kio.kasten.io (v1alpha1)
-# Clé d'import : spec.actions[].exportParameters.receiveString
+# Target CRD: policies.config.kio.kasten.io (v1alpha1)
+# Import key: spec.actions[].exportParameters.receiveString
 #
-# AVERTISSEMENT SÉCURITÉ : le receiveString est une donnée sensible (clé de
-# migration). Ne committez jamais les sorties (voir .gitignore fourni).
+# SECURITY WARNING: the receiveString is sensitive data (a migration key).
+# Never commit the output (see the bundled .gitignore).
 #
 set -euo pipefail
 
 # ---------------------------------------------------------------------------
-# Constantes
+# Constants
 # ---------------------------------------------------------------------------
 SCRIPT_NAME="$(basename "$0")"
 readonly SCRIPT_NAME
-# Nom complet de la CRD K10 contenant les policies.
+# Full name of the K10 CRD that holds the policies.
 readonly K10_POLICY_CRD="policies.config.kio.kasten.io"
-# Namespace par défaut (paramétrable via --namespace). PAS de hardcoding ailleurs.
+# Default namespace (overridable via --namespace). NO hardcoding elsewhere.
 readonly DEFAULT_NAMESPACE="kasten-io"
 
 # ---------------------------------------------------------------------------
-# Variables globales (positionnées par le parsing des arguments)
+# Global variables (set by argument parsing)
 # ---------------------------------------------------------------------------
 NAMESPACE="$DEFAULT_NAMESPACE"
 KUBECONFIG_PATH=""        # --kubeconfig
 OUTPUT_FORMAT="table"     # --output table|json|csv
 OUTPUT_DIR=""             # --output-dir
 ALL_CONTEXTS="false"      # --all-contexts
-CONTEXT_FILE=""           # --context-file (extra : "fichier" de contextes)
+CONTEXT_FILE=""           # --context-file (extra: contexts "file")
 DRY_RUN="false"           # --dry-run
-declare -a CONTEXTS=()    # --context (répétable / séparé par des virgules)
+declare -a CONTEXTS=()    # --context (repeatable / comma-separated)
 
-# Accumulateur de résultats : un objet JSON compact par ligne.
+# Results accumulator: one compact JSON object per line.
 declare -a RESULTS=()
 
 # ---------------------------------------------------------------------------
-# Couleurs (uniquement si la sortie d'erreur est un terminal)
+# Colors (only if stderr is a terminal)
 # ---------------------------------------------------------------------------
 if [[ -t 2 ]]; then
   C_RED="$(printf '\033[31m')"; C_YEL="$(printf '\033[33m')"
@@ -54,7 +54,7 @@ else
 fi
 
 # ---------------------------------------------------------------------------
-# Helpers de log : tout part sur stderr pour ne pas polluer stdout (données).
+# Log helpers: everything goes to stderr to avoid polluting stdout (data).
 # ---------------------------------------------------------------------------
 info() { printf '%s[i]%s %s\n' "$C_GRN" "$C_RST" "$*" >&2; }
 warn() { printf '%s[!]%s %s\n' "$C_YEL" "$C_RST" "$*" >&2; }
@@ -62,136 +62,136 @@ err()  { printf '%s[x]%s %s\n' "$C_RED" "$C_RST" "$*" >&2; }
 die()  { err "$*"; exit 1; }
 
 # ---------------------------------------------------------------------------
-# Aide
+# Help
 # ---------------------------------------------------------------------------
 usage() {
   cat <<EOF
 ${SCRIPT_NAME} - Kasten Import Key Extractor
 
-Récupère les receiveString (import keys) des policies K10 et les exporte
-en table, JSON, et/ou un fichier .key par policy.
+Retrieves the receiveString (import keys) from K10 policies and exports them
+as a table, JSON, and/or one .key file per policy.
 
-USAGE :
+USAGE:
   ${SCRIPT_NAME} [options]
 
-OPTIONS :
-  -n, --namespace <ns>     Namespace K10 à inspecter (défaut: ${DEFAULT_NAMESPACE}).
-  -c, --context <ctx>      Contexte kubeconfig à utiliser. Répétable, ou
-                           plusieurs valeurs séparées par des virgules.
-      --context-file <f>   Fichier contenant un contexte par ligne.
-      --all-contexts       Itère sur TOUS les contextes du kubeconfig.
-      --kubeconfig <path>  Chemin d'un kubeconfig spécifique.
-  -o, --output <fmt>       Format de sortie : table (défaut), json ou csv.
-  -d, --output-dir <dir>   Écrit un fichier <ctx>__<ns>__<policy>.key par
-                           policy, contenant uniquement le receiveString.
-      --dry-run            Montre ce qui serait fait (contextes, namespace,
-                           commandes, fichiers .key) SANS contacter de cluster
-                           ni écrire de fichier.
-  -h, --help               Affiche cette aide.
+OPTIONS:
+  -n, --namespace <ns>     K10 namespace to inspect (default: ${DEFAULT_NAMESPACE}).
+  -c, --context <ctx>      Kubeconfig context to use. Repeatable, or several
+                           values separated by commas.
+      --context-file <f>   File containing one context per line.
+      --all-contexts       Iterate over ALL contexts in the kubeconfig.
+      --kubeconfig <path>  Path to a specific kubeconfig.
+  -o, --output <fmt>       Output format: table (default), json or csv.
+  -d, --output-dir <dir>   Write one <ctx>__<ns>__<policy>.key file per policy,
+                           containing only the receiveString.
+      --dry-run            Show what would be done (contexts, namespace,
+                           commands, .key files) WITHOUT contacting any cluster
+                           or writing any file.
+  -h, --help               Show this help.
 
-EXEMPLES :
-  # Mono-cluster, contexte courant, table
+EXAMPLES:
+  # Single cluster, current context, table
   ${SCRIPT_NAME}
 
-  # Namespace personnalisé + sortie JSON
+  # Custom namespace + JSON output
   ${SCRIPT_NAME} -n kasten-io -o json
 
-  # Un contexte précis + séquestre des clés sur disque
+  # A specific context + escrow keys to disk
   ${SCRIPT_NAME} -c prod-cluster -d ./keys
 
-  # Plusieurs contextes
+  # Multiple contexts
   ${SCRIPT_NAME} -c prod-a,prod-b -o json
 
-  # Tous les contextes du kubeconfig
+  # All contexts in the kubeconfig
   ${SCRIPT_NAME} --all-contexts -d ./keys
 
-  # Sortie CSV (receiveString complet, idéal tableur/automatisation)
+  # CSV output (full receiveString, ideal for spreadsheets/automation)
   ${SCRIPT_NAME} -c prod-a -o csv > import-keys.csv
 
-  # Dry-run : voir le plan sans rien contacter ni écrire
+  # Dry-run: see the plan without contacting or writing anything
   ${SCRIPT_NAME} --all-contexts -d ./keys --dry-run
 
-  # Kubeconfig dédié
-  ${SCRIPT_NAME} --kubeconfig /etc/k10/admin.conf -c recette
+  # Dedicated kubeconfig
+  ${SCRIPT_NAME} --kubeconfig /etc/k10/admin.conf -c staging
 
-SÉCURITÉ :
-  Le receiveString est une clé de migration sensible. Ne committez pas les
-  sorties ; un .gitignore couvrant l'output-dir et *.key est fourni.
+SECURITY:
+  The receiveString is a sensitive migration key. Do not commit the output;
+  a .gitignore covering the output-dir and *.key is provided.
 EOF
 }
 
 # ---------------------------------------------------------------------------
-# Vérification des dépendances : (oc OU kubectl) + jq.
+# Dependency check: (oc OR kubectl) + jq.
 # ---------------------------------------------------------------------------
 check_deps() {
-  command -v jq >/dev/null 2>&1 || die "Dépendance manquante : 'jq' est requis."
+  command -v jq >/dev/null 2>&1 || die "Missing dependency: 'jq' is required."
 
   if ! command -v oc >/dev/null 2>&1 && ! command -v kubectl >/dev/null 2>&1; then
-    die "Dépendance manquante : 'oc' ou 'kubectl' est requis."
+    die "Missing dependency: 'oc' or 'kubectl' is required."
   fi
 }
 
 # ---------------------------------------------------------------------------
-# Client de config (config get-contexts, etc.) : indépendant de la
-# joignabilité d'un cluster. On privilégie oc s'il est présent, sinon kubectl.
+# Config client (config get-contexts, etc.): independent of cluster
+# reachability. We prefer oc if present, otherwise kubectl.
 # ---------------------------------------------------------------------------
 config_cli() {
   if command -v oc >/dev/null 2>&1; then echo "oc"; else echo "kubectl"; fi
 }
 
-# Construit un tableau de commande "config" complet (binaire + kubeconfig).
-# On inclut toujours le binaire pour ne JAMAIS exposer un tableau vide à
-# l'expansion (bash 3.2 + set -u plante sur "${arr[@]}" quand arr est vide).
-# Résultat dans la variable globale CFG_CMD.
+# Builds a complete "config" command array (binary + kubeconfig).
+# We always include the binary so we NEVER expose an empty array to expansion
+# (bash 3.2 + set -u crashes on "${arr[@]}" when arr is empty).
+# Result goes into the global variable CFG_CMD.
 build_config_cmd() {
   CFG_CMD=("$(config_cli)")
   [[ -n "$KUBECONFIG_PATH" ]] && CFG_CMD+=(--kubeconfig "$KUBECONFIG_PATH")
-  return 0   # ne pas propager le statut du test ci-dessus (set -e)
+  return 0   # do not propagate the status of the test above (set -e)
 }
 
 # ---------------------------------------------------------------------------
-# Détection de l'environnement pour UN contexte donné.
+# Environment detection for ONE given context.
 #
-# Renvoie (via echo) le binaire à utiliser : "oc" ou "kubectl".
-# Détecte OpenShift via la présence des API groups route.openshift.io ou
-# config.openshift.io. Si OpenShift est détecté -> oc exclusivement.
-# Sinon -> kubectl (fallback). Retourne 1 si le cluster est injoignable.
+# Returns (via echo) the binary to use: "oc" or "kubectl".
+# Detects OpenShift via the presence of the route.openshift.io or
+# config.openshift.io API groups. If OpenShift is detected -> oc exclusively.
+# Otherwise -> kubectl (fallback). Returns 1 if the cluster is unreachable.
 #
-# $1 = contexte (peut être vide = contexte courant)
+# $1 = context (may be empty = current context)
 # ---------------------------------------------------------------------------
 detect_cli() {
   local ctx="$1"
 
-  # Client sonde : on utilise oc si présent (capable de parler à n'importe
-  # quel cluster k8s), sinon kubectl.
+  # Probe client: we use oc if present (able to talk to any k8s cluster),
+  # otherwise kubectl.
   local probe; probe="$(config_cli)"
 
-  # Arguments de connexion (kubeconfig + contexte si fourni).
+  # Connection arguments (kubeconfig + context if provided).
   local -a conn=("$probe")
   [[ -n "$KUBECONFIG_PATH" ]] && conn+=(--kubeconfig "$KUBECONFIG_PATH")
   [[ -n "$ctx" ]] && conn+=(--context "$ctx")
 
-  # Interroge les API resources. Sert aussi de test de joignabilité /
-  # validité du contexte : un échec ici => on saute ce cluster.
+  # Query the API resources. Doubles as a reachability / context-validity
+  # check: a failure here => we skip this cluster.
   local api_out
   if ! api_out="$("${conn[@]}" api-resources 2>/dev/null)"; then
     return 1
   fi
 
-  # OpenShift si l'un des API groups caractéristiques est présent.
+  # OpenShift if one of the characteristic API groups is present.
   if grep -qE 'route\.openshift\.io|config\.openshift\.io' <<<"$api_out"; then
     if command -v oc >/dev/null 2>&1; then
       echo "oc"
     else
-      # OpenShift détecté mais 'oc' indisponible : on prévient et on
-      # retombe sur kubectl (mieux que d'échouer totalement).
-      warn "OpenShift détecté mais 'oc' indisponible : fallback sur kubectl."
+      # OpenShift detected but 'oc' unavailable: warn and fall back to
+      # kubectl (better than failing outright).
+      warn "OpenShift detected but 'oc' is unavailable: falling back to kubectl."
       echo "kubectl"
     fi
     return 0
   fi
 
-  # Pas OpenShift : kubectl si dispo, sinon oc (toujours capable).
+  # Not OpenShift: kubectl if available, otherwise oc (always capable).
   if command -v kubectl >/dev/null 2>&1; then
     echo "kubectl"
   else
@@ -201,87 +201,87 @@ detect_cli() {
 }
 
 # ---------------------------------------------------------------------------
-# Énumère les contextes à traiter et remplit le tableau global CONTEXTS.
-# Priorité : --all-contexts > --context / --context-file > contexte courant.
+# Enumerates the contexts to process and fills the global CONTEXTS array.
+# Priority: --all-contexts > --context / --context-file > current context.
 # ---------------------------------------------------------------------------
 resolve_contexts() {
-  # --context-file : on ajoute chaque ligne non vide / non commentée.
+  # --context-file: add each non-empty / non-commented line.
   if [[ -n "$CONTEXT_FILE" ]]; then
-    [[ -r "$CONTEXT_FILE" ]] || die "Fichier de contextes illisible : $CONTEXT_FILE"
+    [[ -r "$CONTEXT_FILE" ]] || die "Unreadable context file: $CONTEXT_FILE"
     local line
     while IFS= read -r line || [[ -n "$line" ]]; do
-      line="${line%%#*}"                       # retire les commentaires
-      line="$(echo "$line" | tr -d '[:space:]')" # retire les espaces
+      line="${line%%#*}"                       # strip comments
+      line="$(echo "$line" | tr -d '[:space:]')" # strip whitespace
       [[ -n "$line" ]] && CONTEXTS+=("$line")
     done < "$CONTEXT_FILE"
   fi
 
-  # --all-contexts : on liste tout le kubeconfig (incompatible avec --context).
+  # --all-contexts: list the whole kubeconfig (mutually exclusive with --context).
   if [[ "$ALL_CONTEXTS" == "true" ]]; then
     if (( ${#CONTEXTS[@]} > 0 )); then
-      die "--all-contexts est incompatible avec --context / --context-file."
+      die "--all-contexts is mutually exclusive with --context / --context-file."
     fi
     build_config_cmd
     local names
     if ! names="$("${CFG_CMD[@]}" config get-contexts -o name 2>/dev/null)"; then
-      die "Impossible de lister les contextes du kubeconfig."
+      die "Unable to list the kubeconfig contexts."
     fi
-    [[ -n "$names" ]] || die "Aucun contexte trouvé dans le kubeconfig."
+    [[ -n "$names" ]] || die "No context found in the kubeconfig."
     local n
     while IFS= read -r n; do
       [[ -n "$n" ]] && CONTEXTS+=("$n")
     done <<<"$names"
   fi
 
-  # Aucun contexte spécifié : on utilise le contexte courant (chaîne vide).
+  # No context specified: use the current context (empty string).
   if (( ${#CONTEXTS[@]} == 0 )); then
     CONTEXTS=("")
   fi
 }
 
 # ---------------------------------------------------------------------------
-# Traite UN contexte : détecte le CLI, vérifie le namespace, récupère les
-# policies, extrait les receiveString et les empile dans RESULTS.
+# Processes ONE context: detects the CLI, checks the namespace, fetches the
+# policies, extracts the receiveString values and pushes them into RESULTS.
 #
-# $1 = contexte (peut être vide = contexte courant)
-# Ne fait jamais échouer le script global : journalise et retourne.
+# $1 = context (may be empty = current context)
+# Never fails the whole script: it logs and returns.
 # ---------------------------------------------------------------------------
 process_context() {
   local ctx="$1"
-  local ctx_label="${ctx:-<contexte courant>}"
+  local ctx_label="${ctx:-<current context>}"
 
-  info "Cluster : ${ctx_label} (namespace: ${NAMESPACE})"
+  info "Cluster: ${ctx_label} (namespace: ${NAMESPACE})"
 
-  # Détermine le bon client (oc/kubectl) ; échoue si cluster injoignable.
+  # Determine the right client (oc/kubectl); fails if the cluster is unreachable.
   local cli
   if ! cli="$(detect_cli "$ctx")"; then
-    err "  Cluster injoignable ou contexte invalide : ${ctx_label} — ignoré."
+    err "  Unreachable cluster or invalid context: ${ctx_label} — skipped."
     return 0
   fi
 
-  # Construit la commande de base réutilisable (toujours >= 1 élément).
+  # Build the reusable base command (always >= 1 element).
   local -a kube=("$cli")
   [[ -n "$KUBECONFIG_PATH" ]] && kube+=(--kubeconfig "$KUBECONFIG_PATH")
   [[ -n "$ctx" ]] && kube+=(--context "$ctx")
 
-  # Vérifie l'existence du namespace.
+  # Check that the namespace exists.
   if ! "${kube[@]}" get namespace "$NAMESPACE" >/dev/null 2>&1; then
-    err "  Namespace absent : ${NAMESPACE} sur ${ctx_label} — ignoré."
+    err "  Missing namespace: ${NAMESPACE} on ${ctx_label} — skipped."
     return 0
   fi
 
-  # Récupère les policies en JSON. Si la CRD est absente ou l'accès refusé,
-  # 'get' échoue : on journalise et on continue.
+  # Fetch the policies as JSON. If the CRD is absent or access is denied,
+  # 'get' fails: we log and move on.
   local json
   if ! json="$("${kube[@]}" get "$K10_POLICY_CRD" -n "$NAMESPACE" -o json 2>/dev/null)"; then
-    err "  Impossible de lister ${K10_POLICY_CRD} (CRD absente ou accès refusé) sur ${ctx_label} — ignoré."
+    err "  Unable to list ${K10_POLICY_CRD} (CRD missing or access denied) on ${ctx_label} — skipped."
     return 0
   fi
 
-  # Extraction via jq : pour chaque policy, on parcourt les actions d'export
-  # disposant d'un receiveString non vide. On tague chaque objet avec le
-  # contexte d'origine. exportData.enabled=true est la condition d'existence
-  # du receiveString ; on filtre sur la présence effective de la clé.
+  # Extraction via jq: for each policy, iterate over the export actions that
+  # have a non-empty receiveString. Each object is tagged with its source
+  # context. exportData.enabled=true is the existence condition for the
+  # receiveString; we filter on the key actually being present.
   local extracted
   extracted="$(
     jq -c --arg ctx "$ctx_label" '
@@ -304,13 +304,13 @@ process_context() {
     ' <<<"$json"
   )"
 
-  # Aucune policy d'export avec clé : on prévient mais on continue.
+  # No export policy with a key: warn but keep going.
   if [[ -z "$extracted" ]]; then
-    warn "  Aucune policy d'export avec receiveString sur ${ctx_label}."
+    warn "  No export policy with a receiveString on ${ctx_label}."
     return 0
   fi
 
-  # Empile chaque objet (une ligne JSON = un enregistrement).
+  # Push each object (one JSON line = one record).
   local count=0 line
   while IFS= read -r line; do
     [[ -n "$line" ]] || continue
@@ -318,11 +318,11 @@ process_context() {
     count=$((count + 1))
   done <<<"$extracted"
 
-  info "  ${count} import key(s) trouvée(s)."
+  info "  ${count} import key(s) found."
 }
 
 # ---------------------------------------------------------------------------
-# Construit un tableau JSON unique à partir de RESULTS.
+# Builds a single JSON array from RESULTS.
 # ---------------------------------------------------------------------------
 results_as_array() {
   if (( ${#RESULTS[@]} == 0 )); then
@@ -333,13 +333,13 @@ results_as_array() {
 }
 
 # ---------------------------------------------------------------------------
-# Sortie table (lisible). Le receiveString est tronqué car potentiellement
-# très long ; la valeur complète est dans le JSON et les fichiers .key.
+# Table output (readable). The receiveString is truncated as it can be very
+# long; the full value is in the JSON and the .key files.
 # ---------------------------------------------------------------------------
 render_table() {
   local arr; arr="$(results_as_array)"
 
-  # En-tête + lignes, tabulées, puis alignées via column -t.
+  # Header + rows, tab-separated, then aligned via column -t.
   {
     printf 'CONTEXT\tPOLICY\tNAMESPACE\tPROFILE\tMIGRATION_TOKEN\tRECEIVE_STRING\n'
     jq -r '
@@ -356,18 +356,18 @@ render_table() {
   } | column -t -s $'\t'
 
   echo
-  info "receiveString tronqué dans la table. Valeur complète : --output json ou --output-dir."
+  info "receiveString truncated in the table. Full value: --output json or --output-dir."
 }
 
 # ---------------------------------------------------------------------------
-# Sortie CSV. Contrairement à la table, le receiveString est COMPLET (format
-# destiné au tableur / à l'automatisation). jq @csv gère l'échappement
-# (guillemets, virgules) correctement.
+# CSV output. Unlike the table, the receiveString is FULL (format intended for
+# spreadsheets / automation). jq @csv handles escaping (quotes, commas)
+# correctly.
 # ---------------------------------------------------------------------------
 render_csv() {
   local arr; arr="$(results_as_array)"
 
-  # En-tête CSV.
+  # CSV header.
   printf 'context,policy,namespace,profile,profile_namespace,migration_token,migration_token_namespace,receive_string\n'
 
   jq -r '
@@ -385,18 +385,18 @@ render_csv() {
 }
 
 # ---------------------------------------------------------------------------
-# Écrit un fichier .key par policy dans OUTPUT_DIR (receiveString uniquement).
+# Writes one .key file per policy into OUTPUT_DIR (receiveString only).
 # ---------------------------------------------------------------------------
 write_key_files() {
   [[ -n "$OUTPUT_DIR" ]] || return 0
 
-  mkdir -p "$OUTPUT_DIR" || die "Impossible de créer le répertoire : $OUTPUT_DIR"
+  mkdir -p "$OUTPUT_DIR" || die "Unable to create directory: $OUTPUT_DIR"
 
   local arr; arr="$(results_as_array)"
   local total; total="$(jq 'length' <<<"$arr")"
-  (( total > 0 )) || { warn "Aucune clé à écrire dans ${OUTPUT_DIR}."; return 0; }
+  (( total > 0 )) || { warn "No key to write into ${OUTPUT_DIR}."; return 0; }
 
-  # On itère par index pour récupérer chaque champ proprement.
+  # Iterate by index to fetch each field cleanly.
   local i fname recv ctx policy ns
   for (( i = 0; i < total; i++ )); do
     ctx="$(jq -r ".[$i].context"       <<<"$arr")"
@@ -404,45 +404,45 @@ write_key_files() {
     ns="$(jq -r ".[$i].namespace"       <<<"$arr")"
     recv="$(jq -r ".[$i].receiveString" <<<"$arr")"
 
-    # Nom de fichier : <ctx>__<ns>__<policy>.key ; caractères dangereux
-    # remplacés par '_' pour rester compatible avec le système de fichiers.
+    # Filename: <ctx>__<ns>__<policy>.key ; unsafe characters are replaced
+    # with '_' to stay filesystem-compatible.
     fname="$(printf '%s__%s__%s.key' "$ctx" "$ns" "$policy" \
              | tr -c 'A-Za-z0-9._-' '_')"
 
-    # On écrit UNIQUEMENT le receiveString (copier-coller direct).
+    # Write ONLY the receiveString (direct copy/paste).
     printf '%s' "$recv" > "${OUTPUT_DIR}/${fname}"
-    # Permissions restrictives : donnée sensible.
+    # Restrictive permissions: sensitive data.
     chmod 600 "${OUTPUT_DIR}/${fname}" 2>/dev/null || true
   done
 
-  info "${total} fichier(s) .key écrit(s) dans ${OUTPUT_DIR} (chmod 600)."
-  warn "Ces fichiers contiennent des clés de migration. NE PAS committer."
+  info "${total} .key file(s) written to ${OUTPUT_DIR} (chmod 600)."
+  warn "These files contain migration keys. DO NOT commit them."
 }
 
 # ---------------------------------------------------------------------------
-# Sortie principale (stdout) selon le format demandé.
+# Main output (stdout) according to the requested format.
 # ---------------------------------------------------------------------------
 render_output() {
   case "$OUTPUT_FORMAT" in
     json)  results_as_array ;;
     table) render_table ;;
     csv)   render_csv ;;
-    *)     die "Format de sortie inconnu : $OUTPUT_FORMAT (attendu: table|json|csv)" ;;
+    *)     die "Unknown output format: $OUTPUT_FORMAT (expected: table|json|csv)" ;;
   esac
 }
 
 # ---------------------------------------------------------------------------
-# Parsing des arguments.
+# Argument parsing.
 # ---------------------------------------------------------------------------
 parse_args() {
   while (( $# > 0 )); do
     case "$1" in
       -n|--namespace)
-        [[ $# -ge 2 ]] || die "Option $1 requiert une valeur."
+        [[ $# -ge 2 ]] || die "Option $1 requires a value."
         NAMESPACE="$2"; shift 2 ;;
       -c|--context)
-        [[ $# -ge 2 ]] || die "Option $1 requiert une valeur."
-        # Supporte les valeurs séparées par des virgules.
+        [[ $# -ge 2 ]] || die "Option $1 requires a value."
+        # Supports comma-separated values.
         IFS=',' read -r -a _split <<<"$2"
         local v
         for v in "${_split[@]}"; do
@@ -450,68 +450,68 @@ parse_args() {
         done
         shift 2 ;;
       --context-file)
-        [[ $# -ge 2 ]] || die "Option $1 requiert une valeur."
+        [[ $# -ge 2 ]] || die "Option $1 requires a value."
         CONTEXT_FILE="$2"; shift 2 ;;
       --all-contexts)
         ALL_CONTEXTS="true"; shift ;;
       --dry-run)
         DRY_RUN="true"; shift ;;
       --kubeconfig)
-        [[ $# -ge 2 ]] || die "Option $1 requiert une valeur."
+        [[ $# -ge 2 ]] || die "Option $1 requires a value."
         KUBECONFIG_PATH="$2"; shift 2 ;;
       -o|--output)
-        [[ $# -ge 2 ]] || die "Option $1 requiert une valeur."
+        [[ $# -ge 2 ]] || die "Option $1 requires a value."
         OUTPUT_FORMAT="$2"; shift 2 ;;
       -d|--output-dir)
-        [[ $# -ge 2 ]] || die "Option $1 requiert une valeur."
+        [[ $# -ge 2 ]] || die "Option $1 requires a value."
         OUTPUT_DIR="$2"; shift 2 ;;
       -h|--help)
         usage; exit 0 ;;
       --) shift; break ;;
-      -*) die "Option inconnue : $1 (voir --help)." ;;
-      *)  die "Argument inattendu : $1 (voir --help)." ;;
+      -*) die "Unknown option: $1 (see --help)." ;;
+      *)  die "Unexpected argument: $1 (see --help)." ;;
     esac
   done
 
-  # Validation du format de sortie au plus tôt.
+  # Validate the output format as early as possible.
   case "$OUTPUT_FORMAT" in
     table|json|csv) ;;
-    *) die "Format invalide : $OUTPUT_FORMAT (attendu: table|json|csv)." ;;
+    *) die "Invalid format: $OUTPUT_FORMAT (expected: table|json|csv)." ;;
   esac
 }
 
 # ---------------------------------------------------------------------------
-# Mode dry-run : affiche le plan (contextes, namespace, commandes, fichiers
-# .key qui seraient produits) SANS contacter de cluster ni écrire de fichier.
+# Dry-run mode: print the plan (contexts, namespace, commands, .key files that
+# would be produced) WITHOUT contacting any cluster or writing any file.
 # ---------------------------------------------------------------------------
 print_dry_run() {
-  # Le client réel dépend de la détection OpenShift par cluster (impossible
-  # sans contacter le cluster), on affiche donc le client de sonde.
+  # The actual client depends on per-cluster OpenShift detection (impossible
+  # without contacting the cluster), so we show the probe client instead.
   local probe; probe="$(config_cli)"
 
-  info "DRY-RUN : aucune connexion cluster, aucun fichier écrit."
+  info "DRY-RUN: no cluster connection, no file written."
   printf '\n'
-  printf 'Plan :\n'
+  printf 'Plan:\n'
   printf '  Namespace        : %s\n' "$NAMESPACE"
-  printf '  Format de sortie : %s\n' "$OUTPUT_FORMAT"
-  printf '  Kubeconfig       : %s\n' "${KUBECONFIG_PATH:-<défaut>}"
-  printf '  Output-dir       : %s\n' "${OUTPUT_DIR:-<aucun>}"
-  printf '  Détection CLI    : OpenShift -> oc, sinon kubectl (par contexte)\n'
-  printf '  Sonde de config  : %s\n' "$probe"
-  printf '  Contextes (%d)   :\n' "${#CONTEXTS[@]}"
+  printf '  Output format    : %s\n' "$OUTPUT_FORMAT"
+  printf '  Kubeconfig       : %s\n' "${KUBECONFIG_PATH:-<default>}"
+  printf '  Output-dir       : %s\n' "${OUTPUT_DIR:-<none>}"
+  printf '  CLI detection    : OpenShift -> oc, otherwise kubectl (per context)\n'
+  printf '  Config probe     : %s\n' "$probe"
+  printf '  Contexts (%d)    :\n' "${#CONTEXTS[@]}"
 
   local ctx ctx_label kc_flag=""
   [[ -n "$KUBECONFIG_PATH" ]] && kc_flag=" --kubeconfig $KUBECONFIG_PATH"
   for ctx in "${CONTEXTS[@]}"; do
-    ctx_label="${ctx:-<contexte courant>}"
+    ctx_label="${ctx:-<current context>}"
     local ctx_flag=""
     [[ -n "$ctx" ]] && ctx_flag=" --context $ctx"
     printf '    - %s\n' "$ctx_label"
-    printf '        détection : <oc|kubectl>%s%s api-resources\n' "$kc_flag" "$ctx_flag"
-    printf '        lecture   : <oc|kubectl>%s%s get %s -n %s -o json\n' \
+    printf '        detect : <oc|kubectl>%s%s api-resources\n' "$kc_flag" "$ctx_flag"
+    printf '        read   : <oc|kubectl>%s%s get %s -n %s -o json\n' \
       "$kc_flag" "$ctx_flag" "$K10_POLICY_CRD" "$NAMESPACE"
     if [[ -n "$OUTPUT_DIR" ]]; then
-      printf '        écrirait  : %s/%s__%s__<policy>.key\n' \
+      printf '        write  : %s/%s__%s__<policy>.key\n' \
         "$OUTPUT_DIR" "$ctx_label" "$NAMESPACE"
     fi
   done
@@ -519,34 +519,34 @@ print_dry_run() {
 }
 
 # ---------------------------------------------------------------------------
-# Point d'entrée.
+# Entry point.
 # ---------------------------------------------------------------------------
 main() {
   parse_args "$@"
   check_deps
   resolve_contexts
 
-  # Dry-run : on affiche le plan et on s'arrête là.
+  # Dry-run: print the plan and stop here.
   if [[ "$DRY_RUN" == "true" ]]; then
     print_dry_run
     exit 0
   fi
 
-  info "Contextes à traiter : ${#CONTEXTS[@]}"
+  info "Contexts to process: ${#CONTEXTS[@]}"
 
-  # On parcourt tous les contextes ; un échec sur l'un n'interrompt pas
-  # les autres (process_context journalise et retourne).
+  # Iterate over all contexts; a failure on one does not interrupt the others
+  # (process_context logs and returns).
   local ctx
   for ctx in "${CONTEXTS[@]}"; do
     process_context "$ctx"
   done
 
-  # Écriture des fichiers .key (si --output-dir) puis sortie principale.
+  # Write the .key files (if --output-dir) then the main output.
   write_key_files
 
   if (( ${#RESULTS[@]} == 0 )); then
-    warn "Aucune import key trouvée sur l'ensemble des clusters traités."
-    # Sortie cohérente même vide (tableau vide en JSON).
+    warn "No import key found across all processed clusters."
+    # Consistent output even when empty (empty array in JSON).
     [[ "$OUTPUT_FORMAT" == "json" ]] && echo "[]"
     exit 0
   fi
